@@ -1,0 +1,1141 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Mar 20 00:56:15 2016
+
+@author: ppmsIPI
+"""
+import time
+import win32com.client
+import visa
+import os
+import sys
+import matplotlib.pyplot as plt
+import numpy as np
+import clr
+import Skype4Py 
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtGui, QtCore
+import subprocess as sp
+import threading as td
+
+
+DATA=''
+COLUMNS=''
+
+try:
+    print('direct')
+    clr.AddReference('QDInstrument')
+except:
+    print('except')
+    if clr.FindAssembly('QDInstrument') is None:
+        print('Could not find QDInstrument.dll')
+    else:
+        print(('Found QDInstrument.dll at {}'.format(clr.FindAssembly('QDInstrument'))))
+        print('Try right-clicking the .dll, selecting "Properties", and then clicking "Unblock"')
+
+# import the C# classes for interfacing with the PPMS
+import QuantumDesign.QDInstrument as QDInstrument
+
+
+#labview=win32com.client.Dispatch('LabVIEW.Application')
+rm=visa.ResourceManager()
+k2400_address='GPIB0::24::INSTR'
+
+
+
+class PPMS():
+    """Thin wrapper around the QuantumDesign.QDInstrument.QDInstrumentBase class"""
+
+    def __init__(self):
+        self.QDI_PPMS_TYPE=QDInstrument.QDInstrumentBase.QDInstrumentType.PPMS
+        self.ip_address='127.0.0.1'
+        self.DEFAULT_PORT=11000
+        self.qdi_instrument = QDInstrument.QDInstrumentFactory.GetQDInstrument(self.QDI_PPMS_TYPE, False, self.ip_address, self.DEFAULT_PORT)
+        self.TstatusDict={0:'unknown',1:'stable',2:'tracking',6:'chasing',5:'near'}
+        self.FieldStatusDict={6:'charging',4:'holding',3:'sw-cool',1:'persistent'}
+       
+
+    def getTemperature(self):
+        """Return the current temperature, in Kelvin."""
+        Tstatus=self.qdi_instrument.GetTemperature(0,0)
+        try:
+            return str(Tstatus[1]),self.TstatusDict[Tstatus[2]]
+        except:
+            return str(Tstatus[1]),'recognize problem'
+                
+
+    def setTemperature(self, temp, rate=10, stable=1):
+        """Set the temperature.
+            Keyword arguments:
+            temp -- the temperature in Kelvin
+            rate -- the cooling / heating rate, in K / min
+            """
+        self.qdi_instrument.SetTemperature(temp, rate, 0)
+        
+        if stable==1:
+            time.sleep(10)
+            Tstatus=self.getTemperature()
+            while not Tstatus[1]=='stable':
+                Tstatus=self.getTemperature()
+                time.sleep(10)
+                print('Temperature is ' +Tstatus[0]+'K')
+            print('Temperature Stable')
+                
+        
+
+    def waitForTemperature(self, delay=5, timeout=600):
+        """Pause execution until the PPMS reaches the temperature setpoint."""
+        return self.qdi_instrument.WaitFor(True, False, False, False, delay, timeout)
+
+    def getField(self):
+        """Return the current field, in gauss."""
+        FieldStatus=self.qdi_instrument.GetField(0,0)
+        try:
+            return str(FieldStatus[1]),self.FieldStatusDict[FieldStatus[2]]
+        except:
+            return str(FieldStatus[1]),'recognize problem'
+
+    def setField(self, field, rate=150,holdingornot=1,stable=1):
+        """Set the field.
+            Keyword arguments:
+            field -- the field, in gauss
+            rate  -- the field sweep rate, in gauss / second
+            """
+        self.qdi_instrument.SetField(field, rate, 0,holdingornot )
+        if stable==1:
+            time.sleep(30)
+            FieldStatus=self.getField()
+            while not (FieldStatus[1]=='holding' or FieldStatus[1]=='persistent'):
+                FieldStatus=self.getField()
+                time.sleep(5)
+                print('Magnetic field is '+FieldStatus[0]+'Oe')
+        
+    def waitForField(self, delay=5, timeout=600):
+        """Pause execution until the PPMS reaches the field setpoint."""
+        return self.qdi_instrument.WaitFor(False, True, False, False, delay, timeout)
+            
+    def getPPMSStatus(self):
+        Tstatus=self.getTemperature()
+        Fieldstatus=self.getField()
+        return Tstatus[0],Tstatus[1],Fieldstatus[0],Fieldstatus[1]
+    
+class K6221():                                                    
+    """Just in delta mode 20190904"""
+    
+    def __init__(self,k6221_address='GPIB0::1::INSTR'):
+        self.k6221=rm.open_resource(k6221_address)
+    def A2182_connect(self):
+        self.k6221.write('SOUR:DELT:NVPR')
+            
+    def set_I_HIGH(self,I_HIGH=1e-3):
+        self.k6221.write('SOUR:DELT:HIGH {}'.format(str(I_HIGH)))
+    def set_I_LOW(self,I_LOW=-1e-3):
+        self.k6221.write('SOUR:DELT:LOW '+ str(I_LOW))
+    def set_delay(self,delay=0.002):
+        self.k6221.write('SOUR:DELT:DELAY {}'.format(str(delay)))
+    def set_delta_count(self, delta_count='INF'):
+        self.k6221.write('SOUR:DELT:COUNt {}'.format(str(delta_count)))    # 1 to 65536 and inifinte
+    def arm(self):
+        self.k6221.write('SOUR:DELT:ARM')
+    def read_buffer(self):
+       # self.k6221.query(':SENS:DATA?')
+      # time.sleep(0.10)
+        return self.k6221.query_ascii_values('SENS:DATA:FRESh?')[0]
+    
+    def set_unit(self,unit='OHMS'):
+        self.k6221.write('UNIT {}'.format(str(unit)))  #specify reading units
+    def stop_meas(self):
+        self.k6221.write('SOUR:SWE:ABOR')
+        
+    def ARM_Delta(self,I_resource=1e-3,delay=0.002,delta_count='INF'):
+        if not self.ask_delta_mode():
+            self.set_I_HIGH(I_resource)
+            self.set_delta_count(delta_count)
+            self.set_delay(delay)
+            self.k6221.write('SOUR:DELT:CAB on')
+            
+            self.arm
+            time.sleep(5)
+            while not self.ask_delta_mode():
+                self.arm
+                time.sleep(1)
+
+            self.k6221.write(':INIT:IMM')      # start delta measurement
+            time.sleep(1)
+            print('Delta mode is running')
+            
+    def ask_delta_mode(self):
+        return int(self.k6221.query('SOUR:DELT:ARM?'))
+        
+    def R_text_init(self,pathfilename,meas_type='T(K)'):
+        ''' measure_type: T(K), H(Oe), Voltage(V) '''
+        
+        global COLUMNS
+        COLUMNS=str(meas_type)+', R(ohms)\n'
+        print(COLUMNS)
+        if not os.path.exists(pathfilename):
+            f1=open(pathfilename,'a')
+            f1.write(COLUMNS)
+            f1.close()
+           
+    def Delta_R_T(self,pathfilename,set_Temp,Temp_speed):
+        global DATA
+        self.R_text_init(pathfilename,'T(K)')
+        ppms=PPMS()
+        ppms.setTemperature(set_Temp,Temp_speed,stable=0)
+        temperature=float(ppms.getTemperature()[0])
+        data_last=DATA
+        #self.ARM_Delta(I_resource=1e-6,delay=0.002,delta_count='INF')
+        #self.set_unit()
+        while abs(temperature-set_Temp)>0.01:
+            #self.set_unit()
+            R=self.read_buffer()
+            temperature=float(ppms.getTemperature()[0])
+            DATA=str(temperature)+','+str(R) +'\n'
+            if not DATA==data_last:
+                f1=open(pathfilename,'a')
+                f1.write(DATA)
+                f1.close()
+                data_last=DATA
+                print(temperature)
+                time.sleep(0.5)
+                
+    def Delta_R_H(self,pathfilename,init_H,end_H,H_ramp):
+        global DATA
+        self.R_text_init(pathfilename,'H(Oe)')
+        ppms=PPMS()
+        ppms.setField(init_H)
+        ppms.setField(end_H,H_ramp,stable=0)
+        field=float(ppms.getField()[0])
+        data_last=DATA
+        
+        while abs(field-end_H)>1:
+            R=self.read_buffer()
+            field=float(ppms.getField()[0])
+            DATA=str(field)+','+str(R)+'\n'
+            if not DATA==data_last:
+                f1=open(pathfilename,'a')
+                f1.write(DATA)
+                f1.close()
+                data_last=DATA
+                print(field)
+                time.sleep(0.5)
+                
+        time.sleep(20)        
+        ppms.setField(init_H,H_ramp,stable=0)
+        field=float(ppms.getField()[0])
+        data_last=DATA
+        
+        while abs(field-init_H)>1:
+            R=self.read_buffer()
+            field=float(ppms.getField()[0])
+            DATA=str(field)+','+str(R)+'\n'
+            if not DATA==data_last:
+                f1=open(pathfilename,'a')
+                f1.write(DATA)
+                f1.close()
+                data_last=DATA
+                print(field)
+                time.sleep(0.5)
+                
+        ppms.setField(init_H,stable=0)
+        
+    def arm_sin(self,mode='sin',f=7,offset=0.001,ampl=20e-6,Range='FIX'):
+        self.k6221.write('SOUR:WAVE:FUNC '+mode)
+        self.k6221.write('SOUR:WAVE:FREQ '+str(f))
+        self.k6221.write('SOUR:WAVE:AMPL '+str(ampl))
+        self.k6221.write('SOUR:WAVE:OFFS '+str(offset))
+        self.k6221.write('SOUR:WAVE:PMAR:STAT ON')
+        self.k6221.write('SOUR:WAVE:DUR:TIME INF')
+        self.k6221.write('SOUR:WAVE:RANG '+Range)
+        
+        self.k6221.write('SOUR:WAVE:ARM')
+        self.k6221.write('SOUR:WAVE:INIT')
+        
+    def wave_abor(self):
+        self.k6221.write('SOUR:WAVE:ABOR')
+        
+    def set_ACamp(self,ampl=10e-6,amp=2e-6):
+        
+        self.k6221.write('SOUR:WAVE:AMPL '+str(ampl))
+        
+    def AC_range(self,Ran='fixed'):
+        self.k6221.write('SOUR:WAVE:RANG '+Ran)
+        
+    def set_DCoffset(self,offset=-1e-3,ramp=2e-5):
+        '''offset: [-0.105 , 0.105] in A. but in Amps for SCPI
+           ramp: 
+        '''
+        dcoffset=self.read_DCoffset()
+        print(('the start offset is '+str(dcoffset*1E3)+'mA'))
+        delta_offset=offset - dcoffset
+        
+        while abs(delta_offset) != 0:
+            
+            if delta_offset < 0:
+                k=-1
+            if delta_offset == 0:
+                k=0
+            if delta_offset > 0:
+                k=1
+                
+            set_offset=dcoffset + k*min(abs(delta_offset),ramp)
+            self.k6221.write('SOUR:WAVE:OFFS '+str(set_offset))
+            
+            dcoffset=self.read_DCoffset()
+            delta_offset=offset - dcoffset
+            time.sleep(1)
+            
+        dcoffset=self.read_DCoffset()
+        
+        print(('Isd is '+str(dcoffset*1e3)+'mA'))
+                   
+        
+    def read_DCoffset(self):
+        Isd=self.k6221.query('SOUR:WAVE:OFFS?')
+        '''unit in A'''
+        return float(Isd)
+        
+    def dvdi_text_init(self,pathfilename):
+        global COLUMNS
+    
+        COLUMNS='Isd(A),dV(V),dR(Ω)\n'
+        print(COLUMNS)
+        if not os.path.exists(pathfilename):
+            f1=open(pathfilename,'a')        
+            f1.write(COLUMNS)
+            f1.close()
+            
+    def sweep_offset(self, pathfilename,Istart=-4e-3,Iend=4e-3,ramp=2e-5,dI=2e-5):
+        # ALL current in mA in set-up
+        global DATA
+        self.dvdi_text_init(pathfilename)
+        
+        sr830=SR830()
+        data_last=DATA
+        
+        self.set_DCoffset(Istart)
+        dcoffset=self.read_DCoffset()   # in mA
+        delta_offset=Iend - dcoffset
+        
+        while abs(delta_offset) != 0:
+            
+            if delta_offset < 0:
+                k=-1
+            if delta_offset == 0:
+                k=0
+            if delta_offset > 0:
+                k=1
+                
+            dV=sr830.GetVoltageAverage(n=10,amplifier=1.0).split(',')[0]
+            dR=float(dV)/float(dI)
+            DATA=str(dcoffset)+','+str(dV) +','+str(dR)+'\n'
+            if not DATA==data_last:
+                f1=open(pathfilename,'a')
+                f1.write(DATA)
+                f1.close()
+                data_last=DATA
+                print(('Isd is '+str(dcoffset*1e3)+'mA'))
+                time.sleep(0.2)   
+                
+            set_offset=dcoffset + k*min(abs(delta_offset),ramp)
+            self.k6221.write('SOUR:WAVE:OFFS '+str(set_offset))
+            
+            dcoffset=self.read_DCoffset()
+            delta_offset=Iend - dcoffset
+            time.sleep(1)
+
+
+        Istart=-Istart
+        Iend=-Iend
+        self.set_DCoffset(Istart)
+        dcoffset=self.read_DCoffset()   
+        delta_offset=Iend - dcoffset
+
+        while abs(delta_offset) != 0:
+            
+            if delta_offset < 0:
+                k=-1
+            if delta_offset == 0:
+                k=0
+            if delta_offset > 0:
+                k=1
+                
+            dV=sr830.GetVoltageAverage(n=10,amplifier=1.0).split(',')[0]
+            dR=float(dV)/float(dI)
+            DATA=str(dcoffset)+','+str(dV) +','+str(dR)+'\n'
+            if not DATA==data_last:
+                f1=open(pathfilename,'a')
+                f1.write(DATA)
+                f1.close()
+                data_last=DATA
+                print(('Isd is '+str(dcoffset*1e3)+'mA'))
+                time.sleep(0.2)   
+                
+            set_offset=dcoffset + k*min(abs(delta_offset),ramp)
+            self.k6221.write('SOUR:WAVE:OFFS '+str(set_offset))
+            
+            dcoffset=self.read_DCoffset()
+            delta_offset=Iend - dcoffset
+            time.sleep(1)
+    
+        
+       
+
+class K2400():
+    def __init__(self,k2400_address='GPIB0::10::INSTR'):
+        self.k2400=rm.open_resource(k2400_address)
+        
+    def IVCurve_sourceV(self,IVFilename,StartV=-0.05,EndV=0.05,StepV=0.01):
+        f=open(IVFilename,'a')
+        Voltage = StartV
+        RealV=[]
+        RealI=[]
+        global COLUMNS,DATA
+        COLUMNS='V(V), I(A)\n'
+        while Voltage <= EndV:    
+            self.k2400.write(':sour:volt '+str(Voltage))
+            time.sleep(1)            
+            VIpoint=self.k2400.query(':measure:curr:dc?').split(',')[0:2]
+            print(VIpoint)
+            RealV.append(float(VIpoint[0]))
+            RealI.append(float(VIpoint[1]))
+            DATA=str(VIpoint[0])+','+str(VIpoint[1])+'\r'
+            f.write(DATA)          
+            Voltage=Voltage+StepV
+            time.sleep(1)
+            
+        self.k2400.write(':sour:volt 0')
+        f.close()
+        FitResult=np.polyfit(RealI,RealV,1)
+        return FitResult[0]
+    def IVCurve_sourceI(self,IVFilename,StartI=-1e-6,EndI=1e-6,StepI=1e-7):
+        f=open(IVFilename,'a')
+        Curr = StartI
+        RealV=[]
+        RealI=[]
+        global COLUMNS,DATA
+        COLUMNS='V(V), I(A)\n'
+        while Curr <= EndI:    
+            self.k2400.write(':sour:curr '+str(Curr))
+            time.sleep(0.2)            
+            print(':sour:curr '+str(Curr))
+            VIpoint=self.k2400.query(':measure:volt:dc?').split(',')[0:2]
+            print(VIpoint)
+            RealV.append(float(VIpoint[0]))
+            RealI.append(float(VIpoint[1]))
+            DATA=str(VIpoint[0])+','+str(VIpoint[1])+'\r'
+            f.write(DATA)          
+            Curr=Curr+StepI
+            
+        self.k2400.write(':sour:volt 0')
+        f.close()
+        FitResult=np.polyfit(RealI,RealV,1)
+        return FitResult[0]
+    
+class K2002():
+    def __init__(self,k2002_address='GPIB0::14::INSTR'):
+        self.k2002=rm.open_resource(k2002_address)
+    def GetVoltageAverage(self,n=30,amplifier=1.0):
+        VoltageList=[]
+        for i in range(n):        
+            VoltageList.append(float(self.k2002.query(':data?').split(',')[0][:-4]))
+        if len(VoltageList)==n:
+            print('dc data ok')
+        else:
+            print('dc data error')
+        voltage=sum(VoltageList[1:])/(n-1.0)/amplifier
+        return voltage
+        
+class PNA():
+    """ N5234B, MY58421516 """
+    
+    def __init__(self,pna_address='GPIB0::30::INSTR'):
+        self.pna=rm.open_resource(pna_address)
+        
+    def set_measure_type(self, measure_type='S21'):
+        self.pna.write('calc1:meas1:par '+ measure_type)
+        
+    def set_freq_center(self,freq_center):
+        """ frequency, in Hz """
+        
+        self.pna.write(':sens1:freq:cent '+ str(freq_center))
+        
+    def set_freq_start(self, freq_start=500e3):
+        self.pna.write(':sens1:freq:star '+ str(freq_start))
+        
+    def set_freq_stop(self, freq_stop=43e9):
+        self.pna.write(':sens1:freq:stop '+ str(freq_stop))
+        
+    def set_freq_points(self, points= 1601):
+        self.pna.write(':sens1:swe:poin '+ str(points)) 
+        
+    def set_freq_step(self,step=1e9):
+        self.pna.write(':sens1:freq:cent:step:auto 0')
+        self.pna.write(':sens1:freq:cent:step: '+str(step))
+        
+    def set_freq_span(self, freq_span=10e9):
+        self.pna.write(':sens1:freq:span '+ str(freq_span))
+        
+    def set_power(self, power=-25):
+        """ unit in dBm"""
+        self.pna.write(':sour1:pow1 '+ str(power))
+        
+    def set_on_off(self, on_off='ON'):
+        self.pna.write(':OUTP '+on_off)
+        
+    def set_ave(self, n= 16):
+        self.pna.write(':sens1:aver on')
+        self.pna.write(':sens1:aver:coun '+ str(n))
+        
+    def set_IF(self, IF=10e3):
+        self.pna.write(':sens1:bwid '+ str(IF))
+    
+    def auto_scale(self):
+        self.pna.write(':DISP:WIND1:TRAC1:Y:AUTO')
+    
+    def set_trigger(self,mode='hold'):
+        """trigger types:
+        HOLD,CONTiunous,GROups,SINgle
+        """
+        self.pna.write(':sens1:swe:mode '+mode)
+        
+    def set_sweep_type(self, sweep_type='LIN'):
+        """trigger types:
+        LINear,MLOG,CW,
+        """
+        self.pna.write('sens1:swe:type '+sweep_type)
+        
+    def set_sweep_time(self, sweep_time):
+        self.pna.write(':sens1:swe:time:auto off')
+        self.pna.write(':sens1:swe:time: '+ str(sweep_time))
+    
+    def ReadLine(self, MeasureNum=1):
+        line=self.pna.query(':CALC1:meas'+str(MeasureNum)+':DATA:FDAT?').replace(',+0.00000000000E+000','')
+        return line
+    
+    def get_freq(self):
+        return self.pna.query(':CALC1:MEAS1:X?') 
+    
+    
+    def fmr_init(self,measure_type='S21',freq_start=500e3,freq_stop=43e9,points=1601,power=-25,ave=16,IF=10e3,sweep_time=0):
+        self.set_measure_type(measure_type)
+        self.set_freq_start(freq_start)
+        self.set_freq_stop(freq_stop)
+        self.set_freq_points(points)
+        self.set_power(power)
+        self.set_ave(ave)
+        self.set_IF(IF)
+        self.auto_scale()
+        self.set_sweep_time(sweep_time)
+        print('PNA_FMR initilization is OK') 
+        
+    def fmr_text_init(self,pathfile):
+        global COLUMNS
+        freq=self.get_freq()
+        COLUMNS='H,'+freq
+        print(COLUMNS)
+        
+        if not os.path.exists(pathfile):
+            f1=open(pathfile, 'a')
+            f1.write(COLUMNS)
+            f1.close()
+
+    def fmr_measure(self, pathfile, field, field_rate):
+        field_end=0
+        global DATA
+        self.fmr_text_init(pathfile)
+        ppms=PPMS()
+        ppms.setField(field)
+        ppms.setField(field_end,field_rate,stable=0)
+        field_realtime=float(ppms.getField()[0])
+        data_last=DATA
+        
+        while abs(field_realtime-field_end)>1:
+            s21=self.ReadLine(1)
+            field_realtime=float(ppms.getField()[0])
+            DATA=str(field_realtime)+','+s21
+            if not DATA==data_last:
+                f1=open(pathfile, 'a')
+                f1.write(DATA)
+                f1.close()
+                data_last=DATA
+                print(field_realtime)
+                time.sleep(0.5)
+        
+        if field_end !=0:
+            ppms.setField(0,field_rate,stable=0)
+        
+                
+
+class VNA():
+    def __init__(self,vna_address='GPIB0::27::INSTR'):
+        self.vna=rm.open_resource(vna_address)
+    def set_measure_type(self,measure_type='S21'):
+        self.vna.write('calc1:par1:def '+measure_type)
+    def SetFreqCenter(self,frequency):
+        '''
+        frequency unit Hz
+        '''
+        self.vna.write(':sens1:freq:cent '+str(frequency))
+    def set_freq_start(self,freq_start=300e3):
+        self.vna.write(':sens1:freq:star '+str(freq_start))
+    def set_freq_stop(self,freq_stop=20e9):
+        self.vna.write(':sens1:freq:stop '+str(freq_stop))
+    def set_freq_point(self,point=1601):
+        self.vna.write(':sens1:swe:poin '+str(point))
+    def set_power(self,power=-4):
+        '''
+        power unit dbm
+        '''
+        self.vna.write(':sour1:pow '+str(power))
+        
+    def set_on_off(self,on_off_string):
+        self.vna.write(':OUTP '+on_off_string)
+        print(('sweep power set as '+on_off_string))
+        
+    def set_ave(self,n=16):
+        self.vna.write(':sens1:aver on')
+        self.vna.write(':sens1:aver:coun '+str(n))
+    def set_IF(self,IF=10e3):
+        self.vna.write(':sens1:bwid '+str(IF))
+    def auto_scale(self):
+        self.vna.write(':DISP:WIND1:TRAC1:Y:AUTO')
+    def set_freq_span(self,span):
+        self.vna.write(':sens1:freq:span '+str(span))
+    def set_freq_cent(self,freq_cent):
+        self.vna.write(':sens1:freq:cent '+str(freq_cent))
+    def set_sweep_time(self,sweep_time):
+        self.vna.write(':sens1:swe:time:auto off')
+        self.vna.write(':sens1:swe:time:data '+str(sweep_time))
+    def ReadLine(self,TraceNum=1):
+        return self.vna.query(':CALC1:trac'+str(TraceNum)+':DATA:FDAT?').replace(',+0.00000000000E+000','')
+        
+    def GetFreq(self):
+        return self.vna.query(':SENS1:FREQ:DATA?')
+    
+    def set_triggerMode(self,mode='CONT'):
+        '''
+        mode= HOLD, SINGle, CONtinue
+        '''
+        self.vna.write(':TRIG:TRIG: '+mode)
+        
+    def set_span(self,fcent=10e9,fspan=0.2e9,power=-5,points=201,ave=16,IF=10e3,sweep_time=0):
+        self.set_freq_cent(fcent)
+        self.set_freq_span(fspan)
+        self.set_freq_point(points)
+        self.set_power(power)
+        self.set_ave(ave)
+        self.set_IF(IF)
+        self.auto_scale()
+        self.set_sweep_time(sweep_time)
+        
+        print(('VNA set as fcenter:'+str(fcent/1e9)+'GHz fspan: '+str(fspan/1e9)+'GHz power: '+str(power)+'dBm'))
+    
+        
+    def fmr_init(self,measure_type='S21',freq_start=300e3,freq_stop=20e9,points=1601,power=-5,ave=16,IF=10e3,sweep_time=0):
+        self.set_measure_type(measure_type)
+        self.set_freq_start(freq_start)
+        self.set_freq_stop(freq_stop)
+        self.set_freq_point(points)
+        self.set_power(power)
+        self.set_ave(ave)
+        self.set_IF(IF)
+        self.auto_scale()
+        self.set_sweep_time(sweep_time)
+#        self.set_triggerMode(mode)
+        print('VNA_FMR initilization is OK') 
+        
+    def fmr_text_init(self,pathfilename):
+        global COLUMNS
+        freq=self.GetFreq()
+        COLUMNS='H,'+freq
+        print(COLUMNS)
+        if not os.path.exists(pathfilename):
+            f1=open(pathfilename,'a')        
+            f1.write(COLUMNS)
+            f1.close()
+    def fmr_measure(self,pathfilename,field,field_speed):
+        field_end=0
+        global DATA
+        self.fmr_text_init(pathfilename)        
+        ppms=PPMS()
+        #set field to field_start
+        ppms.setField(field)
+        time.sleep(50)
+        #set field to field_end
+        ppms.setField(field_end,field_speed,stable=0)
+        field_realtime=float(ppms.getField()[0])
+        data_last=DATA
+        while abs(field_realtime-field_end)>1:# have not reach field_end
+            s21=self.ReadLine(1)
+            field_realtime=float(ppms.getField()[0])
+            DATA=str(field_realtime)+','+s21
+            if not DATA==data_last:
+                f1=open(pathfilename,'a')
+                f1.write(DATA)             
+                f1.close()
+                data_last=DATA
+                print(field_realtime)
+                time.sleep(0.4)
+        # if field_end is not zero, set field 0 after finishing measurement
+        '''
+        field_end=field
+        ppms.setField(field_end,field_speed,stable=0)
+        field_realtime=float(ppms.getField()[0])
+        data_last=DATA
+        while abs(field_realtime-field_end)>1:# have not reach field_end
+            s21=self.ReadLine(1)
+            field_realtime=float(ppms.getField()[0])
+            DATA=str(field_realtime)+','+s21
+            if not DATA==data_last:
+                f1=open(pathfilename,'a')
+                f1.write(DATA)             
+                f1.close()
+                data_last=DATA
+                print field_realtime
+                time.sleep(0.4)
+        '''
+        if field_end!=0:
+            ppms.setField(0,field_speed,stable=0)
+           
+    def spin_pumping_init(self,measure_type='S21',freq_cent=7e9,fspan=0.2e9,fpoint=2,power=-10,ave=16,IF=10e3,sweep_time=300):
+        self.set_measure_type(measure_type)
+        self.set_freq_cent(freq_cent)
+        self.set_freq_span(fspan)
+        self.set_freq_point(fpoint)
+        self.set_power(power)
+        self.set_ave(ave)
+        self.set_IF(IF)
+        self.auto_scale()
+        self.set_sweep_time(sweep_time)
+        print('VNA_Spin Pumping initilization is OK') 
+
+class SR830():
+    
+    def __init__(self,address='GPIB0::5::INSTR'):
+        self.sr830=rm.open_resource(address)
+    def GetVoltageAverage(self,n=10,amplifier=1.0):
+        '''
+        return float numpy array '[x,y,R,theta]
+        '''
+        voltagelist=np.zeros((1,4))
+        for i in range(n):    
+            voltagelist=np.vstack((voltagelist,np.array(self.sr830.query('snap?1,2,3,4').split(','),dtype='float',ndmin=2)))
+            time.sleep(0.05)
+        voltage=np.sum(voltagelist[2:][:],axis=0)/(n-1.0)/[[amplifier,amplifier,amplifier,1]]
+        return str.join(',',[str(i) for i in voltage[0]])
+    def ClearBuffer(self):
+        self.sr830.query('snap?1,2,3,4')
+        self.sr830.write('REST')
+        time.sleep(1)
+        self.sr830.write('REST')
+        time.sleep(1)
+    def get_phase(self):
+        lenth=3
+        while not lenth==1:
+            phase=self.sr830.query('phas?')
+            lenth=len(phase.split(','))
+            print(phase)
+        return phase
+    def auto_phase(self):
+        self.sr830.write('aphs')
+        time.sleep(20)
+        print('auto phaseing,wait 20s')
+    def set_phase(self,phase):
+        print('setting phase to be',phase)
+        self.sr830.write('phas '+str(phase))
+    def get_freq(self):
+        lenth=3
+        while not lenth==1:
+            freq=self.sr830.query('freq?')
+            lenth=len(freq.split(','))
+            print(freq)
+        print('reference frequency is ', freq)
+        return freq
+    
+class RealPlot():
+    '''
+    
+        
+    '''
+    def __init__(self,axes,title,PlotType='FMR'):
+        self.axes=axes        
+        self.title=title
+        self.PlotType=PlotType
+        self.initialize()
+    def initialize(self):
+        self.xylabel={'FMR':['Magnetic Field (Oe)','S21 (db)'],'SP':['Magnetic Field (Oe)','Voltage (V)'],'RT':['T (K)','Resistance (ohm)']}
+        self.axes.set_title(self.title)
+        self.axes.set_xlabel(self.xylabel[self.PlotType][0])
+        self.axes.set_ylabel(self.xylabel[self.PlotType][1])
+        plt.ion()
+        self.graph=plt.plot([],[],r'b-D')[0]
+    def plot(self,xdata,ydata):
+        self.graph.set_data(xdata,ydata)
+        self.axes.relim()
+        self.axes.autoscale_view(True,True,True)
+        plt.draw()
+        plt.pause(0.01)        
+def FourPointIVCurveSetV(IVFilename,StartV=-5e-1,EndV=5e-1,StepV=2e-2):
+    global COLUMNS,DATA
+    k2400=K2400()
+    k2002=K2002()
+    f=open(IVFilename,'a')
+    AppliedVoltage=StartV
+    currents=[]
+    voltages=[]
+    COLUMNS='SorceV,SorceI,VoltageV\n'
+    f.write(COLUMNS)
+    while abs(AppliedVoltage-EndV)>abs(StepV)*0.5:
+        k2400.k2400.write(':sour:volt '+str(AppliedVoltage))
+        time.sleep(1)
+        source_voltage=k2400.k2400.query(':measure:curr:dc?').split(',')[0]
+        source_current=k2400.k2400.query(':measure:curr:dc?').split(',')[1]
+        Voltage=k2002.GetVoltageAverage()
+        DATA=source_voltage+','+source_current+','+str(Voltage)+'\n'
+        f.write(DATA)
+        AppliedVoltage=AppliedVoltage+StepV
+        #time.sleep(0.3)
+        voltages.append(Voltage)
+        currents.append(float(source_current))
+    #k2400.k2400.write(':sour:volt 0')
+    f.close()
+    FitResult=np.polyfit(currents,voltages,1)
+    return FitResult[0]
+    
+def FourPointIVCurveSetI(IVFilename,StartI=-1e-5,EndI=1e-5,StepI=1e-6):
+    global COLUMNS,DATA
+    k2400=K2400()
+    k2002=K2002()
+    f=open(IVFilename,'a')
+    AppliedCurrent=StartI
+    currents=[]
+    voltages=[]
+    COLUMNS='sourceI,VoltageV\n'
+    f.write(COLUMNS)
+    while abs(AppliedCurrent-EndI)>abs(StepI)*0.5:
+        k2400.k2400.write(':sour:curr '+str(AppliedCurrent))
+        time.sleep(0.3)
+        Current=k2400.k2400.query(':measure:curr:dc?').split(',')[1]
+        Voltage=k2002.GetVoltageAverage()
+        DATA=Current+','+str(Voltage)+'\n'
+        f.write(DATA)
+        AppliedCurrent=AppliedCurrent+StepI
+        time.sleep(0.5)
+        voltages.append(Voltage)
+        currents.append(float(Current))
+    k2400.k2400.write(':sour:curr 0')
+    f.close()
+    FitResult=np.polyfit(currents,voltages,1)
+    return FitResult[0]
+    
+def SweepTMeasureR(RFilename,TDestination=10,Trate=10,current=1e-5):
+    
+    ppms=PPMS()
+    k2400=K2400()
+    k2002=K2002()  
+    ppms.setTemperature(TDestination,Trate,0)
+    temperature=1000
+    while abs(temperature-TDestination)>0.1:
+        temperature=float(ppms.getPPMSStatus()[0])
+        k2400.k2400.write(':sour:curr '+ str(current)) 
+        time.sleep(0.3)
+        current=k2400.k2400.query(':measure:curr:dc?').split(',')[1]
+        voltage=k2002.GetVoltageAverage()
+        k2400.k2400.write(':sour:curr 0')         
+        Resistance=voltage/float(current)
+                
+        f=open(RFilename,'a')
+        f.write(str(temperature)+','+current+','+str(voltage)+','+str(Resistance)+'\r')
+        f.close()
+        print((str(temperature)+','+current+','+str(voltage)+','+str(Resistance)))
+        time.sleep(0.5)
+    
+def SpinPumingDC2002(filename,StartMag=1000,StopMag=0,Rate=2,amplifier=1):
+    global COLUMNS,DATA
+    #name=os.path.splitext(os.path.basename(filename))[0]    
+    COLUMNS='H, Spin Pumping Voltage,Temperature\n'
+    if not os.path.exists(filename):
+        f=open(filename,'a')
+        f.write(COLUMNS)
+        f.close()  
+    ppms=PPMS()
+    k2002=K2002()
+    ppms.setField(StartMag)
+    time.sleep(5)
+    ppms.setField(StopMag,rate=Rate,stable=0)
+    time.sleep(3)
+    
+    #realplot=RealPlot(axes,name,'SP')
+
+    Status=ppms.getPPMSStatus()
+    Field=float(Status[2])
+    #FieldList=[]
+    #VoltageList=[]
+    while abs(Field)>abs(StopMag)+1:
+            Status=ppms.getPPMSStatus()
+            Field=float(Status[2])
+            try:
+                Voltage=k2002.GetVoltageAverage(amplifier=amplifier,n=10)
+            except:
+                print('2002 read error')
+                continue
+                
+            #FieldList.append(Field)
+            #VoltageList.append(Voltage)
+            DATA=str(Field)+','+str(Voltage)+','+Status[0]+'\n'
+            f=open(filename,'a')                
+            f.write(DATA)
+            f.close()
+            #realplot.plot(FieldList,VoltageList)
+            #print Field,Voltage
+            
+            
+    #plt.ioff()
+    #f.close()
+
+def SpinPumingSR830(filename,StartMag=1000,StopMag=0,Rate=2,amplifier=1,autophase=0):
+    global COLUMNS,DATA
+    COLUMNS='H,X,Y,R,Theta,Temperature\n'
+    sr830=SR830()
+    if autophase==1:        
+        print('auto phasing')
+        sr830.auto_phase()
+        print('get phasing')
+        sr830.ClearBuffer()
+        sr830phase=sr830.get_phase()
+        print('phase is ',sr830phase)
+    elif autophase==0:
+        sr830.set_phase(0)
+        sr830phase='0'
+        print('phase is 0')
+    print(filename)
+    filename=filename.replace('.txt','phase'+sr830phase+'.txt').replace('\n','')
+    #name=os.path.splitext(os.path.basename(filename))[0]    
+    if not os.path.exists(filename):
+        f=open(filename,'a')
+        f.write(COLUMNS)
+        f.close()           
+    ppms=PPMS()
+    
+    ppms.setField(StartMag)
+    time.sleep(5)
+    ppms.setField(StopMag,rate=Rate,stable=0)
+    time.sleep(3)
+    
+
+    
+    Status=ppms.getPPMSStatus()
+    Field=float(Status[2])
+    #FieldList=[]
+    #VoltageList=[]
+    while abs(Field)>abs(StopMag)+1:
+            Status=ppms.getPPMSStatus()
+            Field=float(Status[2])
+            try:
+                Voltage=sr830.GetVoltageAverage(amplifier=amplifier)
+                #print Voltage
+            except:
+                print('sr830 error')
+                continue
+            DATA=str(Field)+','+Voltage+','+Status[0]+'\n'
+            f=open(filename,'a')                
+            f.write(DATA)
+            f.close()
+        
+
+class Skype():
+    def __init__(self):
+        try:
+            self.skype=Skype4Py.Skype()
+            self.skype.Attach()
+            print('skype initialization is ok')
+        except:
+            print('some thing wrong with skype')
+
+    def send_message(self,words):
+        try:
+            self.skype.SendMessage('songqiskype',words)
+        except:
+            print('skype sending message error by skype')
+            
+    def call_songqi_skype(self):
+        try:
+            self.skype.PlaceCall('songqiskype')
+        except:
+            print('skype call error')
+            
+def read_last_row(fname):
+    with open(fname, 'rb') as fh:  
+        #first = next(fh)  
+        offs = -10000
+        while True: 
+            fh.seek(offs,2)  
+            lines = fh.readlines()  
+            if len(lines)>1:  
+                last = lines[-1]  
+                break  
+            offs *= 2 
+    return last
+    
+class dynamic_plotter():
+    def __init__(self,plot_row_number,columns_list=[]):
+        self.columns_list=columns_list
+        #initialize the pyqtgraph
+        self.app=QtGui.QApplication([])
+        self.win=pg.GraphicsWindow(title='FMR')
+        self.win.showFullScreen()
+        self.data={}
+        self.columsite={}
+        self.plt={}
+        self.curve={}        
+        self.axies_initial(plot_row_number)
+        #self.win.setFocus()
+        #Timer
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_plot)
+        self.timer.start(250)
+        #self.x=[]
+        #self.y=[]
+        #self.curve=self.plt1.plot(self.x,self.y,pen=(225,0,0))
+        #self.i=0
+        self.data_last=self.columns
+    def axies_initial(self,plot_row_number):
+        global COLUMNS
+        while len(COLUMNS)==0:
+            #print COLUMNS
+            #print 'len(COLUMNS)=0,please wait some time'
+            time.sleep(0.5)
+            self.app.processEvents()
+        self.columns=COLUMNS.split(',')
+        i=0
+        for column in self.columns:
+            self.data[column]=[]
+            self.columsite[column]=i
+            i+=1
+            print('ok')
+            row_number=plot_row_number
+            if not column==self.columns[0]:
+                if len(self.plt)%row_number==0 and len(self.plt)>=row_number:
+                    self.win.nextRow()
+                self.plt[column]=self.win.addPlot(title=column)
+                print('Plot ',self.columns[0],' VS ',column)
+                self.plt[column].showGrid(x=True, y=True)
+                self.plt[column].setLabel('bottom', self.columns[0])
+                self.plt[column].setLabel('left', column)
+                self.curve[column]=self.plt[column].plot(self.data[self.columns[0]],self.data[column])
+        print('axies_initial ok')
+    def update_plot(self):
+        self.get_data()
+        #print self.x,self.y
+        for column in self.plt:    
+            self.curve[column].setData(self.data[self.columns[0]],self.data[column],pen=(225,0,0),symbol='o')
+            self.app.processEvents()
+    def get_data(self):
+        global DATA
+        try:   
+            datanew_read=DATA
+            datanew=[float(i) for i in datanew_read.split(',')]
+        except:
+            #print 'data error'
+            datanew=[0]
+            datanew_read=''
+            #print 'len(columns) should be',len(self.columns),'but your data is ',datanew
+        if datanew_read==self.data_last or not len(self.columns)==len(datanew):
+            pass
+            #print 'datanew_read==self.data_last: ',datanew_read==self.data_last
+            #print 'len(self.columns)==len(datanew): ',len(self.columns)==len(datanew)
+            #print 'no update data,or data error, update next time'
+        else:            
+            for column in self.data:
+                self.data[column].append(datanew[self.columsite[column]])
+            self.data_last=datanew_read
+            #print 'ok update!!'
+    def run(self):
+        sys.exit(self.app.exec_())
+        #self.win.show()
+    
+def real_plot(plot_row_number,columns_list=[]):
+    #global DATA,COLUMNS
+    plotter=dynamic_plotter(plot_row_number,columns_list)
+    plotter.run()
+
+def real_plot_another_process(plot_row_number=1,columns_list=[]):
+    #global DATA,COLUMNS
+    th=td.Thread(target=real_plot,args = (plot_row_number,))
+    th.setDaemon(True)
+    th.start()
+
+
+def find_low_pumping_background_frequency(filename,method='DC'):
+    f=open(filename,'a')
+    global COLUMNS,DATA
+    COLUMNS='Frequency(Hz),Voltage_background\n'
+    f.write(COLUMNS)
+    f.close()
+    freq_start=4e9
+    freq_end=8e9
+    freq_list=np.linspace(4e9,8e9,400)
+    vna=VNA()
+    if method=='DC':
+        voltage_instru=K2002()
+    else:
+        voltage_instru=SR830()
+    for freq in freq_list:       
+        vna.set_freq_cent(freq)
+        time.sleep(0.4)
+        if method=='DC':
+            background=voltage_instru.GetVoltageAverage()
+        else:    
+            background_list=voltage_instru.GetVoltageAverage().split(',')
+            background=background_list[0]
+        DATA=str(freq)+','+str(background)+'\n'
+        print(DATA)
+        f=open(filename,'a')
+        f.write(DATA)
+        f.close()
+
+
+    
+
+    
+    
+def MR_2400_2002(filename,StartMag=1000,StopMag=0,Rate=2,current_source=1e-5,amplifier=1):
+    k2400=K2400()
+    k2002=K2002()
+    global COLUMNS,DATA
+    COLUMNS='H,I,V,R,T\n'
+    print(filename)   
+    if not os.path.exists(filename):
+        f=open(filename,'a')
+        f.write(COLUMNS)
+        f.close()           
+    ppms=PPMS()
+    ppms.setField(StartMag)
+    time.sleep(5)
+    ppms.setField(StopMag,rate=Rate,stable=0)
+    time.sleep(3)
+    
+    Status=ppms.getPPMSStatus()
+    Field=float(Status[2])
+    #FieldList=[]
+    #VoltageList=[]
+    k2400.k2400.write(':sour:curr '+ str(current_source))
+    while abs(Field-StopMag)>1:
+            Status=ppms.getPPMSStatus()
+            Field=float(Status[2])
+            
+            try:
+                current=k2400.k2400.query(':measure:curr:dc?').split(',')[1]
+                voltage=k2002.GetVoltageAverage(amplifier=amplifier)
+                Resistance=voltage/float(current)
+                #print Voltage
+            except:
+                print('measurement error')
+                continue
+            DATA=str(Field)+','+str(current)+','+str(voltage)+','+str(Resistance)+','+Status[0]+'\n'
+            f=open(filename,'a')                
+            f.write(DATA)
+            f.close()
+       
