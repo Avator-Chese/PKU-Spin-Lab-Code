@@ -18,7 +18,7 @@ import fnmatch
 
 
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20211219(CrO2 150nm)\New measure after make angle\[011]\PNA-40GHz'
-folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20220520(CrO2 150nm-2)\[010]\PNA-40GHz'
+folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20211218(CrO2 20nm)\[010]\PNA-40GHz'
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20211219(CrO2 150nm)\[010]\PNA-40GHz'
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20220115(CoFeB of Zhu with higher power)\Sample-Y13\PNA'
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20220114(CoFeB for Zhu CAS)\Sample-YI3\PNA'
@@ -56,7 +56,7 @@ order = str(T_new.index(float(choose_T)) + 1)
 filename = file_form.replace('Value', choose_T).replace('I', order)
 data = sqa.fmr_load_data(folder + '\\' + filename)
 
-# data=data.head(int(len(data)*1/6))
+# data=data.head(int(len(data)*1/2))
 
 sqa.fmr_mesh_dataframe(data)
 

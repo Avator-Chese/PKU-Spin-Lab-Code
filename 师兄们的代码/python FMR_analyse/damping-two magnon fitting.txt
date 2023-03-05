@@ -1,0 +1,18 @@
+
+30  [  2.73153015e-03   2.28442646e+01   5.46503681e+02   1.32252545e-11]
+
+20  [  1.85773054e-02  -2.60627226e+01   5.20122847e+02   1.69513539e-11]
+
+10  [  1.99955888e-02  -1.81997620e+00   4.26209751e+02   1.71178588e-11]
+
+5   [  3.66198656e-02  -6.65838896e+01   5.13612081e+02   1.74394213e-11]
+
+
+
+    res_robust=least_squares(fun_fit,x0,args=(fitx,fity),diff_step=np.array([1e-5,1e-5,1e-5,1e-16]),\
+                             x_scale=np.array([1,1,1,1e-10]),f_scale=100,loss='cauchy',\
+                             bounds=([0,-np.inf,-np.inf,0],[np.inf,np.inf,np.inf,3e-10]))
+
+
+
+https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html

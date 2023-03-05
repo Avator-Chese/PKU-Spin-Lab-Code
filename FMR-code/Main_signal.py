@@ -12,7 +12,7 @@ import ast
 
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20211216(Nb-Py(30)-Nb-JJ device)\power=1dBm'
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20211219(CrO2 150nm)\Third measure after make waveguide angle\[01-1]'
-folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20220520(CrO2 200nm)\[010]\PNA-40GHz'
+folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20220820(EuO-KTO(100))'
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20211219(CrO2 150nm)\[010]\Detailed T'
 # folder = 'C:\\Users\\aoubl\\Desktop\\FMR'
 # folder = r'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20210813-YBCO(sample-2021-08-11)'
@@ -27,7 +27,7 @@ for file in all_files:
 # folder_back = 'D:\ShareCache\郭亮亮_2101110192\科研\All-Data\FMR\PPMS-data\20211219(CrO2 150nm)\back-signal'
 # files_back = os.listdir(folder_back)
 
-file_form = 'Ist_T=ValueK_-5dBm_H=15000Oe_S21.txt'
+file_form = 'Ist_T=ValueK_-5dBm_H=20000Oe_S21.txt'
 # file_back_form = 'Ist_T=ValueK_-5dBm_H=10000Oe_S21.txt'
 
 T = []
@@ -35,7 +35,7 @@ for i in files:
     T.append(ast.literal_eval(re.findall(r'(\d+\.?\d*)K', i)[0]))
 T.sort(reverse=True)
 T_new = T.copy()
-
+print(T_new)
 jud = 1
 if jud == 0:
     print('You are using file\'s Temperature')
@@ -61,15 +61,14 @@ longname_unit_comment1 = [['sysmetrical height', '', ''],
                           ['asysmetrical height', '', ''],
                           ['linear slope', '', ''], ['constant', '', '']]
 #============================================================================================
-'''
 # filebackname = file_back_form.replace('Value', str(choose_T)).replace('I', order)
 # data_back = sqa.fmr_load_data(folder_back + '\\' + filebackname)
-
+'''
 n = 0
 result = []
 #Here is to choose the range of Frequency
 #===============================================================
-fre_range = [25E9, 40E9]
+fre_range = [8E9, 40E9]
 columns = data_measure.columns[:]
 lowest_fre = float(columns[0])
 delta_fre = float(columns[1]) - float(columns[0])
@@ -83,7 +82,7 @@ cut_index = int((cut_fre - lowest_fre) / delta_fre)
 
 top_index = int((fre_range[-1] - lowest_fre) / delta_fre) + 1
 
-More = 0
+More = 1
 if fre_range[0] >= cut_fre:
     More = 0
 if More == 1:
@@ -118,7 +117,7 @@ for i in choose_fre:
     fitting_para = sqa.fit_one_curve(a_range.index.values, absorb)
 
     #print parameters
-    print([n, 0], frequency)
+    print([n], f'{frequency/1e9}GHz')
     n = n + 1
     if sum(abs(fitting_para)) != 0:
         sqa.origin_get_array(table_lineshape_fit,
